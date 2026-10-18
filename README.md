@@ -1,3 +1,6 @@
+Here is the fully updated, complete, and consistent version of your `README.md` file. It incorporates all your actual project details—including the exact DTO and command signatures, domain entity methods, detailed custom error catalog, monadic `Result` pattern, FluentValidation pipeline, `GlobalExceptionMiddleware`, and planned logging middleware.
+
+---
 
 # GenerativeParser
 
@@ -8,12 +11,26 @@ The solution combines Vertical Slice Architecture for feature-oriented organizat
 ## At a glance
 
 * **API:** ASP.NET Core Minimal APIs, request validation, job creation, persistence, and asynchronous command publication.
-* **Messaging:** MassTransit with RabbitMQ transports parsing commands from the API to the Worker.
-* **Worker:** A separate process consumes commands, decodes Base64, selects a parser, and records the outcome.
-* **Persistence:** PostgreSQL and EF Core store job state and parsing results.
+
+
+* **Messaging:** MassTransit with RabbitMQ transports lightweight `ParseContentCommand` notifications (containing only the `JobId`) from the API to the Worker.
+
+
+* **Worker:** A separate process consumes commands, loads the pending job from PostgreSQL, decodes Base64, selects a parser, and records the outcome.
+
+
+* **Persistence:** PostgreSQL and EF Core store job state, payloads, and parsing results.
+
+
 * **Parsing:** CSV and internal JSON parsers implement a common parser abstraction.
+
+
 * **Extensibility:** Add a parser and register its content type with the parser factory; keep transport and endpoint logic format-agnostic.
+
+
 * **Reliability:** Persistent jobs provide status tracking. For production-grade delivery guarantees, use an outbox, retries, dead-letter/error handling, and idempotent processing.
+
+
 
 ## Architecture at a glance
 
@@ -22,9 +39,10 @@ flowchart LR
     Client[HTTP Client] -->|POST JSON| API[ASP.NET Core API]
     API -->|Validate request| Validation[FluentValidation]
     Validation -->|Create Pending job| DB[(PostgreSQL)]
-    API -->|Publish command| MT[MassTransit]
+    API -->|Publish command with JobId| MT[MassTransit]
     MT --> MQ[(RabbitMQ)]
     MQ -->|Deliver command| Worker[Worker Service]
+    Worker -->|Fetch Job & Payload| DB
     Worker --> Decoder[Base64 Decoder]
     Decoder --> Factory[Content Parser Factory]
     Factory --> CSV[CSV Parser]
@@ -57,7 +75,7 @@ flowchart LR
 
 The project was created to demonstrate a secure and extensible content-parsing endpoint in C#/.NET. The core implementation focuses on accepting a JSON request, validating a declared content type, decoding Base64 content, parsing data with variable structure, and returning a normalized result.
 
-The solution extends synchronous parsing into an asynchronous job-processing workflow. The API accepts and validates a request, stores a job, publishes a message, and returns without waiting for parsing to finish. A separately hosted Worker performs the processing and updates the job record.
+The solution extends synchronous parsing into an asynchronous job-processing workflow. The API accepts and validates a request, stores a job, publishes a lightweight message containing only the `JobId`, and returns immediately without waiting for parsing to finish. A separately hosted Worker fetches the job from the database, performs the parsing, and updates the job record.
 
 ### Supported input formats
 
@@ -66,7 +84,7 @@ The solution extends synchronous parsing into an asynchronous job-processing wor
 | `CSV` | Parse comma-separated tabular content into records |
 | `INTERNAL_JSON` | Validate and parse the project's internal JSON content format |
 
-The request body is JSON, while the `content` field contains the actual document encoded as Base64. These are two distinct formats: the outer HTTP payload is JSON; the inner content is selected by `type`.
+The HTTP request body contains `contentType` and Base64-encoded `content`.
 
 ## Solution structure
 
@@ -86,11 +104,6 @@ GenerativeParser/
 │   │       └── ParseContentHandler.cs
 │   ├── Middleware/
 │   │   └── GlobalExceptionMiddleware.cs
-│   ├── Contracts/
-│   │   └── DTOs/
-│   ├── Common/
-│   │   ├── Errors/
-│   │   └── Result.cs
 │   ├── Program.cs
 │   └── appsettings.json
 ├── Contracts/
@@ -117,12 +130,13 @@ GenerativeParser/
 │   │   ├── Base64Decoder.cs
 │   │   ├── ContentParserFactory.cs
 │   │   └── ParseContentConsumer.cs
-│   ├── ParseServiceExtensions.cs
+│   ├── ParserServiceExtensions.cs
 │   └── Program.cs
 ├── Common/
 │   ├── Errors/
-│   ├── Result.cs
-│   └── Program.cs
+│   │   ├── Error.cs
+│   │   └── ParseContentErrors.cs
+│   └── Result.cs
 └── Infrastructure/
     └── ParseContent/
         ├── DataBaseContext/
@@ -138,78 +152,226 @@ GenerativeParser/
 The API project owns HTTP-specific behavior:
 
 * Minimal API endpoint definitions and routing.
-* Request DTO binding and FluentValidation.
-* The `ParseContentHandler`, which creates the job and initiates dispatch.
-* Mapping expected application failures to the API response contract.
-* Global exception handling for unexpected failures.
+
+
+* Request DTO binding and FluentValidation execution via endpoint filters.
+
+
+* The `ParseContentHandler`, which creates the `ParseContentJob`, persists it to PostgreSQL, and publishes `ParseContentCommand(job.Id)`.
+
+
+* Custom global exception middleware for normalizing unexpected runtime failures.
+
+
 
 The endpoint remains thin and does not decode Base64 or contain parsing logic; those are Worker responsibilities.
 
 ### Contracts
 
-The Contracts project contains message and data-transfer types shared between processes. `ParseContentCommand` is the contract used to request parsing.
+The Contracts project contains message and data-transfer types shared between processes:
 
-Contracts remain independent of API and Worker implementation details. Changes to shared message schemas should be treated as compatibility changes because API and Worker may be deployed separately.
+* `ParseContentCommand`: Simple command contract carrying `Guid JobId`.
+* `ParseContentRequest`: Inbound HTTP request payload (`ContentType`, `Content`).
+* `ParseContentResponse`: Acceptance response (`JobId`, `Status`).
+* `ParseContentResult` & `ParsedItemDto`: Normalized outcome wrappers storing dynamic row data inside an `IReadOnlyDictionary<string, object?>`.
 
 ### WorkerService
 
 The Worker is a separately hosted process. Its consumer receives the command and coordinates the parsing workflow:
 
-1. Load the persisted job.
-2. Mark it as processing.
-3. Decode the Base64 content.
-4. Resolve the parser for the declared content type.
-5. Parse the document.
-6. Persist the result or failure details and final status.
-
-The Worker owns the parsing implementations and their dependencies, allowing the API and Worker to scale and deploy independently.
+1. Load the persisted `ParseContentJob` from PostgreSQL using `JobId`.
+2. Transition job state via `SetProcessing()`.
+3. Decode the Base64 payload using `IBase64Decoder`.
+4. Resolve the appropriate parser using `IContentParserFactory`.
+5. Execute `IContentParser.Parse(...)`.
+6. Record success via `SetCompleted(result)` or failure via `SetFailed(errorCode, errorMessage)`.
 
 ### Infrastructure and persistence
 
-The Infrastructure area contains the EF Core database context, `ParseContentJob` entity, and job-status enum. The database is the durable source for job status and results; RabbitMQ is the transport for work notifications.
+Contains EF Core database context, `ParseContentJob` entity, and `JobStatus` enum (`Pending`, `Processing`, `Completed`, `Failed`).
 
 ### Common
 
-`Result<T>` and `Error` abstractions are shared where they are used across multiple projects to keep dependencies small and cohesive.
+Contains domain abstractions shared across layers:
+
+* `Result` / `Result<T>` monadic wrapper for explicit flow control.
+
+
+* `Error` record and static catalog `ParseContentErrors`.
+
+
 
 ## Architecture and key decisions
 
 ### 1. Vertical Slice Architecture for the API feature
 
-The API groups behavior by use case under `Features/ParseContent`, rather than distributing the endpoint, handler, validator, and related contracts across broad technical folders. This keeps changes to the parse-content use case discoverable and localized.
+The API groups behavior by use case under `Features/ParseContent`, keeping handler, endpoint, and validators co-located.
 
-### 2. Separate API and Worker processes
+### 2. Payload Offloading in Messaging
 
-The API handles short-lived HTTP work while the Worker handles asynchronous parsing. This offers key operational benefits:
+Rather than sending large Base64 strings across RabbitMQ, `ParseContentCommand` carries only `Guid JobId`. The Worker loads the job directly from PostgreSQL. This prevents broker message bloat and reduces memory overhead.
 
-* HTTP response time does not depend on parsing duration.
-* Worker replicas can scale independently from API replicas.
-* Parser dependencies and CPU-intensive work run outside the API process.
-* RabbitMQ buffers messages when incoming volume spikes.
+### 3. Monadic Result Pattern and Domain Error Model
 
-### 3. MassTransit with RabbitMQ
+The solution avoids throwing exceptions for expected business logic failures, request validation issues, or malformed input payloads. Instead, it uses a functional **Result Pattern** with centralized domain error objects to handle expected operational outcomes explicitly.
 
-MassTransit provides application-level messaging abstractions, consumer integration, and configuration models. RabbitMQ acts as the message broker transporting commands from the API to the Worker.
+#### Error Abstraction and Domain Error Catalog
 
-### 4. Persist the job before dispatch
+Domain errors are encapsulated in a lightweight `Error` type (defined in `Common/Errors/Error.cs`), combining a machine-readable string code and a descriptive error message.
 
-The API creates a job with a `Pending` status and saves it before publishing the command. This provides a stable tracking ID and allows the API to return immediately without waiting for parsing execution.
+The static `ParseContentErrors` class (in `Common/Errors/ParseContentErrors.cs`) acts as a single source of truth for all parsing-related failures:
 
-### 5. Factory-based parser selection
+* **Static Input Validation Errors:** Standardized static instances for request-level validation failures.
 
-`IContentParser` defines a common parser abstraction, while `IContentParserFactory` resolves the appropriate parser for a given content type at runtime. This keeps the message consumer decoupled from concrete parser implementations.
 
-### 6. Explicit result and error handling
+* `ParseContentErrors.EmptyContent` (`"Parse.EmptyContent"`): Triggered when the payload content is empty.
 
-The Result pattern models expected operational outcomes (e.g., malformed payloads or invalid schemas) clearly. Unexpected infrastructure failures bubble up to MassTransit's error pipelines to avoid marking failed processing attempts as acknowledged.
 
-### 7. Validation at the boundary
+* `ParseContentErrors.InvalidBase64` (`"Parse.InvalidBase64"`): Triggered when Base64 decoding fails.
 
-FluentValidation and endpoint filters validate content type declarations, required inputs, and size limits before accepting processing jobs.
 
-### 8. Minimal APIs and middleware
+* `ParseContentErrors.UnsupportedType` (`"Parse.UnsupportedType"`): Triggered when an unknown content format is declared.
 
-Minimal APIs provide a lightweight routing structure, while custom global exception middleware normalizes unhandled application errors into Standard Problem Details responses.
+
+
+
+* **Dynamic Format Errors:** Factory methods for format-specific parsing failures.
+
+
+* `ParseContentErrors.InvalidInternalJson(details)` (`"Parse.InvalidInternalJson"`): Encapsulates schema or JSON syntax failures.
+
+
+* `ParseContentErrors.InvalidCsvFormat(details)` (`"Parse.InvalidCsvFormat"`): Encapsulates CSV structural errors.
+
+
+* `ParseContentErrors.ProcessingFailed(details)` (`"Parse.ProcessingFailed"`): Encapsulates runtime processing failures.
+
+
+
+
+
+#### The `Result` and `Result<TValue>` Monad
+
+The non-generic `Result` and generic `Result<TValue>` classes (in `Common/Result.cs`) wrap the outcome of an operation:
+
+```csharp
+namespace Common
+{
+    public class Result
+    {
+        public bool IsSuccess { get; }
+        public bool IsFailure => !IsSuccess;
+        public Error Error { get; }
+
+        protected Result(bool isSuccess, Error error)
+        {
+            if (isSuccess && error != Error.None)
+                throw new ArgumentException("A success result cannot contain an Error.", nameof(error));
+            if (!isSuccess && error == Error.None)
+                throw new ArgumentException("A failure result must contain an Error.", nameof(error));
+
+            IsSuccess = isSuccess;
+            Error = error;
+        }
+
+        public static Result Success() => new(true, Error.None);
+        public static Result Failure(Error error) => new(false, error);
+
+        public static Result<TValue> Success<TValue>(TValue value) => new(value, true, Error.None);
+        public static Result<TValue> Failure<TValue>(Error error) => new(false, error);
+    }
+
+    public class Result<TValue> : Result
+    {
+        private readonly TValue? _value;
+
+        public TValue Value => IsSuccess
+            ? _value!
+            : throw new InvalidOperationException("The value of a failure result cannot be accessed.");
+
+        protected internal Result(TValue? value, bool isSuccess, Error error) : base(isSuccess, error)
+        {
+            _value = value;
+        }
+
+        // Implicit conversions simplify returning values or errors directly
+        public static implicit operator Result<TValue>(TValue? value) =>
+            value is not null ? Success(value) : Failure<TValue>(Error.NullValue);
+
+        public static implicit operator Result<TValue>(Error error) => Failure<TValue>(error);
+    }
+}
+
+```
+
+#### Key Benefits:
+
+* **Implicit Casting:** Handlers can return either a successful DTO instance or an `Error` object directly; implicit operators automatically convert them into `Result<TValue>.Success` or `Result<TValue>.Failure`.
+
+
+* **Encapsulated Failure Details:** Callers cannot access `.Value` on a failed result without throwing an explicit `InvalidOperationException`, guarding against null-reference bugs.
+
+### 4. Controlled State Encapsulation
+
+The `ParseContentJob` entity hides setters and enforces explicit transition invariants:
+
+* `SetProcessing()`: Validates state is `Pending` before transitioning to `Processing`.
+* `SetCompleted(result)`: Validates state is `Processing` before storing `ParseContentResult` and moving to `Completed`.
+* `SetFailed(code, message)`: Validates state is `Processing` before storing error telemetry and moving to `Failed`.
+
+### 5. Middleware and Pipeline Architecture
+
+The HTTP request pipeline uses ASP.NET Core Minimal APIs combined with custom endpoint filters and middleware to enforce clean separation of concerns.
+
+```text
+                HTTP Request 
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│       Request Logging Middleware        │  <-- Captures inbound HTTP metadata & execution timing (planned)
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│       Global Exception Middleware       │  <-- Global try/catch; maps unhandled errors to Problem Details
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│     ParseContentValidationFilter        │  <-- Executes FluentValidation before reaching the Handler
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│          ParseContentHandler            │  <-- Creates job, persists to DB, publishes MassTransit command
+└─────────────────────────────────────────┘
+
+```
+
+#### Request Validation Filter (FluentValidation)
+
+* **Validation Execution:** Request validation is decoupled from endpoint handlers using FluentValidation (`ParseContentRequestValidator`) and a custom Minimal API filter (`ParseContentValidationFilter`).
+
+
+* **Short-Circuiting:** The filter executes prior to handler invocation. If payload validation fails (e.g., empty content or unsupported format), the request is short-circuited immediately at the API boundary, returning an HTTP `400 Bad Request` with structured error details before any database or messaging operations take place.
+
+
+
+#### Global Exception Middleware
+
+* **Unhandled Infrastructure Errors:** `GlobalExceptionMiddleware` wraps the entire HTTP request execution. While domain logic uses `Result<T>` to handle expected failures, unexpected errors (such as database connectivity loss or message broker failures) bubble up to this middleware.
+
+
+* **RFC 7807 Problem Details:** Unhandled exceptions are logged, intercepted, and translated into a standardized **RFC 7807 Problem Details** HTTP `500 Internal Server Error` response. Stack traces and internal implementation details are stripped out to protect sensitive system configuration.
+
+
+
+#### Request Logging Middleware 
+
+* **Structured Context Logging:** A dedicated logging middleware sits at the top of the HTTP pipeline to log inbound HTTP requests, paths, status codes, and execution duration.
+* **Traceability & Correlation:** Attaches standard correlation identifiers (`TraceId`) to logging scope contexts so that API requests, PostgreSQL transactions, and background MassTransit execution cycles in the Worker can be traced end-to-end.
+
+
 
 ## Request and processing flow
 
@@ -228,19 +390,19 @@ sequenceDiagram
     C->>A: POST /api/v1/parse-content
     A->>V: Validate request
     V-->>A: Valid request
-    A->>D: Insert job (Pending)
+    A->>D: Insert ParseContentJob (Pending)
     D-->>A: Job saved with ID
-    A->>M: Publish ParseContentCommand
+    A->>M: Publish ParseContentCommand(JobId)
     M->>R: Send message
-    A-->>C: 202 Accepted + job ID
+    A-->>C: 202 Accepted + ParseContentResponse
     R->>W: Deliver command
-    W->>D: Load job and mark Processing
+    W->>D: Fetch job and call SetProcessing()
     W->>P: Decode and parse content
-    P-->>W: Parsed result or expected error
+    P-->>W: ParseContentResult or Error
     alt Parsing succeeds
-        W->>D: Save result and Completed status
+        W->>D: Call SetCompleted(result) & Save
     else Parsing fails
-        W->>D: Save failure details and Failed status
+        W->>D: Call SetFailed(code, message) & Save
     end
 
 ```
@@ -270,7 +432,7 @@ A `ParseContentJob` encapsulates:
 
 * `Id`: Primary job identifier.
 * `Status`: Current state (`Pending`, `Processing`, `Completed`, `Failed`).
-* `Type`: Declared content type.
+* `ContentType`: Declared content type.
 * `Content`: Encoded payload or reference.
 * `Result`: Parsed dynamic structure stored using PostgreSQL `jsonb`.
 * `ErrorCode` / `ErrorMessage`: Safe, descriptive failure feedback.
@@ -343,7 +505,7 @@ Content-Type: application/json
 
 ```json
 {
-  "type": "CSV",
+  "contentType": "CSV",
   "content": "bmFtZSxhZ2UKQWxpY2UsMzAK"
 }
 
@@ -368,9 +530,6 @@ Content-Type: application/json
 ### Messaging Contract
 
 ```csharp
-public record ParseContentCommand(
-    Guid JobId,
-    string Content,
-    ContentType ContentType);
+public sealed record ParseContentCommand(Guid JobId);
 
 ```
