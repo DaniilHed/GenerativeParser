@@ -1,5 +1,5 @@
 ﻿using FluentValidation;
-using GenerativeParser.Common.Errors;
+using Common.Errors;
 using System.ComponentModel.DataAnnotations;
 
 namespace GenerativeParser.Features.ParseContent.Validation

@@ -1,9 +1,10 @@
+using Features.ParseContent.Interfaces;
 using FluentValidation;
 using GenerativeParser.Features.ParseContent;
-using GenerativeParser.Features.ParseContent.Interfaces;
-using GenerativeParser.Features.ParseContent.Processors;
 using GenerativeParser.Features.ParseContent.Validation;
 using GenerativeParser.Middleware;
+using MassTransit;
+using Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,14 +12,27 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+builder.Services.AddMassTransit(configure =>
+{
+	configure.UsingRabbitMq((context, config) =>
+	{
+		config.Host(new Uri(builder.Configuration["RabbutMQ:Host"]!), h =>
+		{
+			h.Username(builder.Configuration["RabbitMQ:Username"]!);
+			h.Username(builder.Configuration["RabbitMQ:Password"]!);
+		});
+		config.ConfigureEndpoints(context);
+	});
+
+});
+
+builder.Services.AddInfrastructure(builder.Configuration);
+
+
 // Register application components and service contracts.
-builder.Services.AddSingleton<IBase64Decoder, Base64Decoder>();
 builder.Services.AddScoped<IParseContentHandler, ParseContentHandler>();
 
-// Register content processors for factory injection.
-builder.Services.AddSingleton<IContentProcessor, CsvContentProcessor>();
-builder.Services.AddSingleton<IContentProcessor, InternalJsonContentProcessor>();
-builder.Services.AddSingleton<IContentProcessorFactory, ContentProcessorFactory>();
+
 
 // Register FluentValidation validators from assembly.
 builder.Services.AddValidatorsFromAssemblyContaining<ParseContentRequestValidator>();

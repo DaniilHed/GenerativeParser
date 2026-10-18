@@ -1,5 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using System.Net;
+
 
 namespace GenerativeParser.Middleware
 {
@@ -16,23 +16,22 @@ namespace GenerativeParser.Middleware
 			catch (Exception ex)
 			{
 				logger.LogError(ex, "An unhandled exception occurred: {Message}", ex.Message);
-				await HandleExceptionAsync(context);
+				await HandleExceptionAsync(context,ex);
 			}
 		}
 
 		// Configures the response headers and writes a JSON ProblemDetails body for server errors
-		private static Task HandleExceptionAsync(HttpContext context)
+		private static Task HandleExceptionAsync(HttpContext context, Exception exception)
 		{
-			// Set HTTP status code to 500 Internal Server Error
 			context.Response.ContentType = "application/json";
-			context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+			context.Response.StatusCode = StatusCodes.Status500InternalServerError;
 
-			// Create a generic error response to prevent data leaks
 			var problemDetails = new ProblemDetails
 			{
-				Status = (int)HttpStatusCode.InternalServerError,
+				Status = StatusCodes.Status500InternalServerError,
 				Title = "Server Error",
-				Detail = "An internal server error occurred. Please try again later."
+				Detail = "An internal server error occurred. Please try again later.",
+				Instance = context.Request.Path
 			};
 
 			return context.Response.WriteAsJsonAsync(problemDetails);

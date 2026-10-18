@@ -1,10 +1,13 @@
-﻿using GenerativeParser.Common;
-using GenerativeParser.Features.ParseContent.DTOs;
+﻿using Common;
+using Contracts.DTOs;
 
-namespace GenerativeParser.Features.ParseContent.Interfaces
+using MassTransit;
+
+
+namespace Features.ParseContent.Interfaces
 {
 	public interface IParseContentHandler
 	{
-		Result<ParseContentResponse> Handle(ParseContentRequest request);
+		Task<Result<ParseContentResponse>> Handle(ParseContentRequest request, CancellationToken cancellationToken = default);
 	}
 }

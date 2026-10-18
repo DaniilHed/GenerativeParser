@@ -1,70 +1,44 @@
-﻿using GenerativeParser.Common;
-using GenerativeParser.Features.ParseContent.DTOs;
-using GenerativeParser.Features.ParseContent.Interfaces;
+﻿using Contracts.DTOs;
+using Features.ParseContent.Interfaces;
+using Common;
+using MassTransit;
+using Infrastructure.ParseContent.DataBaseContext;
+using Infrastructure.ParseContent.Entities;
+using Common.Errors;
+using Microsoft.EntityFrameworkCore;
+
+
 
 namespace GenerativeParser.Features.ParseContent
 {
 	// Hadnler that uses specialised classes to handle parsing and return coorrect response
 	public class ParseContentHandler(
-		IBase64Decoder base64Decoder,
-		IContentProcessorFactory processorFactory,
-		ILogger<ParseContentHandler> logger
+		ILogger<ParseContentHandler> logger,
+		ParseContentDbContext dbContext,
+		IPublishEndpoint publishEndpoint
 		) : IParseContentHandler
 	{
-	
-		public Result<ParseContentResponse> Handle(ParseContentRequest request)
+		public async Task<Result<ParseContentResponse>> Handle(ParseContentRequest request, CancellationToken cancellationToken = default)
 		{
-			logger.LogInformation("Processing parse request for ContentType: {ContentType}", request.Type);
-			
-			// Decode base64 content with custom decoder class
-			var decodedResult = base64Decoder.Decode(request.Content);
-			if (decodedResult.IsFailure)
+			logger.LogInformation("Creating job for ContentType: {ContentType}", request.ContentType);
+
+
+			var job = ParseContentJob.Create(request.ContentType, request.Content);
+			try
 			{
-				logger.LogWarning(
-					"Base64 decoding failed for ContentType: {ContentType}. Code: {ErrorCode}, Description: {ErrorDescription}",
-					request.Type,
-					decodedResult.Error.Code,
-					decodedResult.Error.Description);
-				return decodedResult.Error;
+				 dbContext.Add(job);
+				await dbContext.SaveChangesAsync(cancellationToken);
 			}
-			var decodedContent = decodedResult.Value;
-			
-			// Get correct processor for supported type using factory pattern
-			var processorResult = processorFactory.GetProcessor(request.Type);
-			if (processorResult.IsFailure)
+			catch (DbUpdateException ex) 
 			{
-				logger.LogWarning(
-					"Processor lookup failed for ContentType: {ContentType}. Code: {ErrorCode}, Description: {ErrorDescription}",
-					request.Type,
-					processorResult.Error.Code,
-					processorResult.Error.Description);
-
-				return processorResult.Error;
-			}
-			var processor = processorResult.Value;
-
-			// Process decoded content 
-			var processedResult = processor.Process(decodedContent);
-
-			if (processedResult.IsFailure)
-			{
-				logger.LogWarning(
-					"Content parsing failed for ContentType: {ContentType}. Code: {ErrorCode}, Description: {ErrorDescription}",
-					request.Type,
-					processedResult.Error.Code,
-					processedResult.Error.Description);
-
-				return processedResult.Error;
+				logger.LogError("Saving job with {JobId} to data base Canceled", job.Id);
+				return new Error("Database.SaveFailed", $"Database error occurred while saving the job with Id: {job.Id}.");
 			}
 
-			var data = processedResult.Value;
+			await publishEndpoint.Publish<ParseContentCommand>(new ParseContentCommand(job.Id),cancellationToken);
 
-			logger.LogInformation(
-				"Successfully parsed {RecordCount} records for ContentType: {ContentType}",
-				data.Count,
-				request.Type);
 
-			return new ParseContentResponse(RecordCount:data.Count,Data: data);
+			return new ParseContentResponse(job.Id,job.Status.ToString());
 		}
 	}
 }

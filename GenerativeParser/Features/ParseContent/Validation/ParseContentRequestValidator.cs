@@ -1,7 +1,8 @@
 ﻿
 
+using Contracts.DTOs;
 using FluentValidation;
-using GenerativeParser.Features.ParseContent.DTOs;
+
 
 namespace GenerativeParser.Features.ParseContent.Validation
 {
@@ -9,7 +10,7 @@ namespace GenerativeParser.Features.ParseContent.Validation
 	{	
 		public ParseContentRequestValidator()
 		{
-			RuleFor(x => x.Type)
+			RuleFor(x => x.ContentType)
 				.IsInEnum()
 				.WithMessage("Unsupported or missing 'type'.");
 
